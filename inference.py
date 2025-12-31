@@ -1,13 +1,13 @@
 import warnings
 from pathlib import Path
+
 import hydra
 import torch
-from hydra.utils import instantiate
+from hydra.utils import instantiate, to_absolute_path
 
 from src.datasets.data_utils import get_dataloaders
 from src.trainer import Inferencer
 from src.utils.init_utils import set_random_seed
-from src.utils.io_utils import ROOT_PATH
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -49,13 +49,16 @@ def main(config):
         )
 
     # save_path for model predictions
-    base_dir = ROOT_PATH / "data" / "saved"
-    cfg_path = Path(config.inferencer.save_path)
+    save_path_cfg = config.inferencer.get("save_path")
+    if save_path_cfg is None:
+        raise ValueError("config.inferencer.save_path must not be None")
 
-    # Если путь абсолютный, сохраняем туда,
-    # иначе создаем поддерикторию в data\saved
+    base_dir = Path(to_absolute_path("data/saved"))
+    cfg_path = Path(str(save_path_cfg))
+
     save_path = cfg_path if cfg_path.is_absolute() else (base_dir / cfg_path)
-    save_path.mkdir(exist_ok=True, parents=True)
+    save_path.mkdir(parents=True, exist_ok=True)
+
 
     inferencer = Inferencer(
         model=model,

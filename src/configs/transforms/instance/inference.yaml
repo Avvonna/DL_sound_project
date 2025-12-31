@@ -17,6 +17,6 @@ spectrogram:
   transforms:
     - _target_: src.transforms.Log
       eps: 1e-5
-    - _target_: src.transforms.Normalize1D
-      mean: 0.0
-      std: 1.0
+    - _target_: src.transforms.PerUtteranceCMVN
+      out_mean: 0.0
+      out_std: 1.0

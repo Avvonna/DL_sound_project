@@ -26,14 +26,6 @@ class _BaseMasking(nn.Module):
         self.p = float(p)
         self.aug = nn.Identity()  # default (changed in subclasses)
 
-    @staticmethod
-    def _is_batched(x: torch.Tensor) -> bool:
-        # if dim==3 and x.shape[0] == 1 -> (C,F,T)
-        # if dim==3 -> (B,F,T)
-        if x.dim() == 3:
-            return x.shape[0] != 1
-        return x.dim() == 4
-
     def _apply_one(self, x_3d: torch.Tensor) -> torch.Tensor:
         """
         Apply augmentation to one sample in (C, F, T) format.
@@ -55,26 +47,20 @@ class _BaseMasking(nn.Module):
             x = self._apply_one(x)
             return x.squeeze(0)
 
-        # dim == 3: either (C,F,T) or (B,F,T)
+        # dim == 3: считаем, что это (B, F, T)
         if spectrogram.dim() == 3:
-            if not self._is_batched(spectrogram):
-                # (C,F,T)
-                if torch.rand(1, device=spectrogram.device).item() > self.p:
-                    return spectrogram
-                return self._apply_one(spectrogram)
-
-            # (B,F,T) -> per sample, convert each to (1,F,T)
             B, F, T = spectrogram.shape
             out = spectrogram
-            # clone only if we will modify at least one sample
             modified = False
+
             for i in range(B):
                 if torch.rand(1, device=spectrogram.device).item() > self.p:
                     continue
                 if not modified:
                     out = spectrogram.clone()
                     modified = True
-                out[i] = self._apply_one(out[i].unsqueeze(0)).squeeze(0)
+                out[i] = self._apply_one(out[i].unsqueeze(0)).squeeze(0)  # (1,F,T)->(F,T)
+
             return out
 
         # dim == 4: (B,C,F,T) -> per sample

@@ -1,7 +1,7 @@
 from src.transforms.log import Log
-from src.transforms.normalize import Normalize1D
+from src.transforms.normalize import PerUtteranceCMVN
 
 __all__ = [
-    "Normalize1D",
+    "PerUtteranceCMVN",
     "Log",
 ]

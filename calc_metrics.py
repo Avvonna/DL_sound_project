@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Dict, Tuple
 
-from src.metrics.utils import calc_cer, calc_wer
+from src.metrics.utils import calc_cer, calc_wer, get_distance
 from src.text_encoder.ctc_text_encoder import CTCTextEncoder
 
 
@@ -70,6 +70,12 @@ def main():
 
     total_cer = 0.0
     total_wer = 0.0
+
+    cer_edits = 0
+    cer_den = 0
+    wer_edits = 0
+    wer_den = 0
+
     details = {}
 
     for utt_id, (gt_path, pr_path) in pairs.items():
@@ -78,6 +84,17 @@ def main():
 
         cer = calc_cer(gt, pr)
         wer = calc_wer(gt, pr)
+
+        # micro (global) accumulators
+        if gt:
+            cer_edits += int(get_distance(gt, pr))
+            cer_den += len(gt)
+
+        gt_w = gt.split()
+        pr_w = pr.split()
+        if gt_w:
+            wer_edits += int(get_distance(gt_w, pr_w))
+            wer_den += len(gt_w)
 
         total_cer += cer
         total_wer += wer
@@ -89,13 +106,17 @@ def main():
             "pred": pr,
         }
 
-    # Обычное среднее
     avg_cer = total_cer / len(pairs)
     avg_wer = total_wer / len(pairs)
 
+    micro_cer = (cer_edits / cer_den) if cer_den > 0 else float("nan")
+    micro_wer = (wer_edits / wer_den) if wer_den > 0 else float("nan")
+
     print(f"Matched files: {len(pairs)}")
-    print(f"CER: {avg_cer:.6f} ({avg_cer*100:.2f}%)")
-    print(f"WER: {avg_wer:.6f} ({avg_wer*100:.2f}%)")
+    print(f"CER macro:  {avg_cer:.6f} ({avg_cer*100:.2f}%)")
+    print(f"WER macro:  {avg_wer:.6f} ({avg_wer*100:.2f}%)")
+    print(f"CER micro:  {micro_cer:.6f} ({micro_cer*100:.2f}%)")
+    print(f"WER micro:  {micro_wer:.6f} ({micro_wer*100:.2f}%)")
 
     # Сохранение метрик
     if args.out_json is not None:
