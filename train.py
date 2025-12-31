@@ -58,11 +58,30 @@ def main(config):
     # build optimizer, learning rate scheduler
     trainable_params = filter(lambda p: p.requires_grad, model.parameters())
     optimizer = instantiate(config.optimizer, params=trainable_params)
-    lr_scheduler = instantiate(config.lr_scheduler, optimizer=optimizer)
 
     # epoch_len = number of iterations for iteration-based training
     # epoch_len = None or len(dataloader) for epoch-based training
     epoch_len = config.trainer.get("epoch_len")
+
+    steps_per_epoch = int(epoch_len) if epoch_len is not None else len(dataloaders["train"])
+    epochs = int(config.trainer.n_epochs)
+
+    lr_cfg = config.lr_scheduler
+    lr_target = str(lr_cfg.get("_target_", ""))
+
+    if lr_target.endswith("OneCycleLR") or lr_target.endswith("CyclicLR"):
+        lr_scheduler = instantiate(
+            lr_cfg,
+            optimizer=optimizer,
+            epochs=epochs,
+            steps_per_epoch=steps_per_epoch,
+        )
+    else:
+        # epoch-based schedulers
+        lr_scheduler = instantiate(
+            lr_cfg,
+            optimizer=optimizer,
+        )
 
     trainer = Trainer(
         model=model,

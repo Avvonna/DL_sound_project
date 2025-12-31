@@ -21,6 +21,40 @@ def collate_fn(dataset_items: list[dict]) -> dict:
     """
     batch: dict = {}
 
+    # Аудио, паддим по времени
+    if all(("audio" in it) and torch.is_tensor(it["audio"]) for it in dataset_items):
+        audios = []
+        audio_lens = []
+        for it in dataset_items:
+            a = it["audio"]
+            # ожидаем [1, T] или [T]
+            if a.dim() == 2:
+                a = a.squeeze(0)
+            if a.dim() != 1:
+                raise ValueError(f"audio должен быть [T] или [1,T], а пришло {tuple(a.shape)}")
+            audios.append(a)
+            audio_lens.append(a.shape[0])
+
+        padded_audio = pad_sequence(audios, batch_first=True, padding_value=0.0)    # [B, Tmax]
+        batch["audio"] = padded_audio.unsqueeze(1).contiguous()                     # [B, 1, Tmax]
+        batch["audio_length"] = torch.tensor(audio_lens, dtype=torch.long)
+
+    if all(("audio_orig" in it) and torch.is_tensor(it["audio_orig"]) for it in dataset_items):
+        audios0 = []
+        audio0_lens = []
+        for it in dataset_items:
+            a0 = it["audio_orig"]
+            if a0.dim() == 2:
+                a0 = a0.squeeze(0)
+            if a0.dim() != 1:
+                raise ValueError(f"audio_orig должен быть [T] или [1,T], а пришло {tuple(a0.shape)}")
+            audios0.append(a0)
+            audio0_lens.append(a0.shape[0])
+
+        padded_audio0 = pad_sequence(audios0, batch_first=True, padding_value=0.0)  # [B, Tmax]
+        batch["audio_orig"] = padded_audio0.unsqueeze(1).contiguous()               # [B, 1, Tmax]
+        batch["audio_orig_length"] = torch.tensor(audio0_lens, dtype=torch.long)
+
     # Спектрограммы: приводим к [F, T], паддим по времени
     spectrograms_t_first = []  # сюда складываем [T, F], так удобнее pad_sequence
     spectrogram_lengths = []  # реальные длины по времени (до паддинга)

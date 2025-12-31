@@ -1,6 +1,7 @@
 train:
   _target_: src.datasets.LibrispeechDataset
   part: "train-clean-100"
+  root: "data/datasets/librispeech"
   max_audio_length: 20.0
   limit: null
   instance_transforms: ${transforms.instance_transforms.train}
@@ -8,6 +9,7 @@ train:
 val:
   _target_: src.datasets.LibrispeechDataset
   part: "dev-clean"
+  root: "data/datasets/librispeech"
   max_audio_length: 20.0
   limit: null
   instance_transforms: ${transforms.instance_transforms.inference}

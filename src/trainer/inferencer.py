@@ -8,6 +8,8 @@ import torch
 from tqdm.auto import tqdm
 
 from src.metrics.tracker import MetricTracker
+from src.utils.batch_utils import apply_transforms_to_tensors, move_tensors_to_device
+from src.utils.decoding_utils import decode_beam, decode_greedy, parse_decoding_cfg
 
 
 class Inferencer:
@@ -60,6 +62,8 @@ class Inferencer:
         self.dataloaders = dict(dataloaders)
 
         self.save_path = Path(save_path) if save_path is not None else None
+        if self.save_path is None:
+            print("WARNING: 'save_path' is None. Predictions will NOT be saved to disk, only metrics calculated.")
 
         self.metrics = metrics
         self.metric_tracker: Optional[MetricTracker] = None
@@ -73,16 +77,12 @@ class Inferencer:
             self._from_pretrained(self.cfg_inf.get("from_pretrained"))
 
         # decoding config
-        decoding_cfg = self.config.get("decoding", {})
-
-        self.decode_type = str(decoding_cfg.get("decode_type", "greedy"))  # "greedy" | "beam"
-        self.beam_size = int(decoding_cfg.get("beam_size", 10))
-
-        tpt = decoding_cfg.get("topk_per_timestep", None)
-        self.topk_per_timestep = int(tpt) if tpt is not None else None
-
-        self.beam_threshold = float(decoding_cfg.get("beam_threshold", 70.0))
-        self.save_both_decodes = bool(decoding_cfg.get("save_both_decodes", False))
+        dcfg = parse_decoding_cfg(self.config)
+        self.decode_type = dcfg.decode_type
+        self.beam_size = dcfg.beam_size
+        self.topk_per_timestep = dcfg.topk_per_timestep
+        self.beam_threshold = dcfg.beam_threshold
+        self.save_both_decodes = dcfg.save_both_decodes
 
     def run_inference(self) -> Dict[str, Dict[str, float]]:
         part_logs: Dict[str, Dict[str, float]] = {}
@@ -107,8 +107,8 @@ class Inferencer:
         sample_global_idx = 0
 
         for _, batch in tqdm(enumerate(dataloader), desc=part, total=len(dataloader)):
-            batch = self._move_batch_to_device(batch)
-            batch = self._transform_batch(batch, mode="inference")
+            batch = move_tensors_to_device(batch, self.device, self.cfg_inf.device_tensors)
+            batch = apply_transforms_to_tensors(batch, (self.batch_transforms.get("inference") or {}))
 
             outputs = self.model(**batch)
             batch.update(outputs)
@@ -119,19 +119,18 @@ class Inferencer:
                     f"Got keys: {list(batch.keys())}"
                 )
 
-            # 1. Декодирование
-            pred_greedy = self._decode_greedy(
-                batch["log_probs"], batch["log_probs_length"]
-            )
+            # Декодирование
+            pred_greedy = decode_greedy(self.text_encoder, batch["log_probs"], batch["log_probs_length"])
             pred_beam = None
-
             if self.decode_type == "beam" or self.save_both_decodes:
-                pred_beam = self._decode_beam(
-                    batch["log_probs"], batch["log_probs_length"]
+                pred_beam = decode_beam(
+                    self.text_encoder,
+                    batch["log_probs"],
+                    batch["log_probs_length"],
+                    beam_size=self.beam_size,
+                    topk_per_timestep=self.topk_per_timestep,
+                    beam_threshold=self.beam_threshold,
                 )
-                batch["pred_text_beam"] = pred_beam
-
-            batch["pred_text_greedy"] = pred_greedy
 
             # Основной прогноз
             if self.decode_type == "beam" and pred_beam is not None:
@@ -208,19 +207,6 @@ class Inferencer:
                 return [Path(v[i]).stem for i in range(bsz)]
 
         return [str(default_start + i) for i in range(bsz)]
-
-    def _move_batch_to_device(self, batch: dict) -> dict:
-        for tensor_name in self.cfg_inf.device_tensors:
-            if tensor_name in batch and torch.is_tensor(batch[tensor_name]):
-                batch[tensor_name] = batch[tensor_name].to(self.device)
-        return batch
-
-    def _transform_batch(self, batch: dict, mode: str) -> dict:
-        transforms = self.batch_transforms.get(mode) or {}
-        for tensor_name, transform in transforms.items():
-            if tensor_name in batch and torch.is_tensor(batch[tensor_name]):
-                batch[tensor_name] = transform(batch[tensor_name])
-        return batch
 
     def _decode_greedy(
         self, log_probs: torch.Tensor, lengths: torch.Tensor

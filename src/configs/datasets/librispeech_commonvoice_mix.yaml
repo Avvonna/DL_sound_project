@@ -1,0 +1,49 @@
+# @package datasets
+
+train:
+  _target_: src.datasets.mixed_librispeech_commonvoice.LibriSpeechCommonVoiceMixedDataset
+  
+  # Глобальные фильтры BaseDataset
+  max_audio_length: 20.0 
+  max_text_length: 200
+  limit: null              # Лимит на итоговый микс (null = безлимит)
+  shuffle_index: true
+  seed: 42
+
+  # Параметры LibriSpeech
+  libri_root: "data/datasets/librispeech"
+  libri_part: "train-clean-100"
+
+  # Параметры Common Voice
+  cv_tar_path: "C:/Users/Vlad/Downloads/mcv-scripted-en-v24.0.tar.gz"
+  cv_extract_root: "data/datasets/commonvoise"
+  cv_part: "train"
+  cv_index_limit: 50000 
+  cv_min_duration: 0.5
+  cv_max_duration: ${datasets.train.max_audio_length} 
+
+  # Параметры смешивания
+  cv_fraction: 0.3
+
+  # Трансформации
+  instance_transforms: ${transforms.instance_transforms.train}
+
+
+# Валидация
+val_clean:
+  _target_: src.datasets.LibrispeechDataset
+  part: "dev-clean"
+  root: "data/datasets/librispeech" 
+  limit: null
+  max_audio_length: 20.0
+  shuffle_index: false
+  instance_transforms: ${transforms.instance_transforms.inference}
+
+val_other:
+  _target_: src.datasets.LibrispeechDataset
+  part: "dev-other"
+  root: "data/datasets/librispeech"
+  limit: null
+  max_audio_length: 20.0
+  shuffle_index: false
+  instance_transforms: ${transforms.instance_transforms.inference}

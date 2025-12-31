@@ -1,8 +1,11 @@
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, Optional
 
+import hydra
 import torch
 from numpy import inf
+from omegaconf import OmegaConf
 from torch.nn import Module
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import Optimizer
@@ -17,7 +20,7 @@ from tqdm.auto import tqdm
 
 from src.datasets.data_utils import inf_loop
 from src.metrics.tracker import MetricTracker
-from src.utils.io_utils import ROOT_PATH
+from src.utils.batch_utils import apply_transforms_to_tensors, move_tensors_to_device
 from src.utils.timing import log_examples_per_sec
 
 
@@ -91,20 +94,25 @@ class BaseTrainer(ABC):
         self.batch_transforms = batch_transforms
 
         # Dataloaders
-        self.train_dataloader = dataloaders["train"]
+        self.train_loader = dataloaders["train"]
+        self.train_dataset = self.train_loader.dataset
 
         bs = (
-            getattr(self.train_dataloader, "batch_size", None)
+            getattr(self.train_loader, "batch_size", None)
             or getattr(self.config.dataloader, "batch_size", None)
             or 1
         )
+
         self.train_batch_size = int(bs)
 
+        self.train_iter: Iterable = self.train_loader
         if epoch_len is None:
-            self.epoch_len = len(self.train_dataloader)
+            # обычный итератор
+            self.epoch_len = len(self.train_loader)
         else:
-            self.train_dataloader = inf_loop(self.train_dataloader)
+            # бесконечный итератор
             self.epoch_len = int(epoch_len)
+            self.train_iter = inf_loop(self.train_loader)
 
         self.evaluation_dataloaders = {
             k: v for k, v in dataloaders.items() if k != "train"
@@ -114,6 +122,8 @@ class BaseTrainer(ABC):
         self._last_epoch = 0
         self.start_epoch = 1
         self.epochs = int(self.cfg_trainer.n_epochs)
+
+        self.total_steps = int(self.epochs) * int(self.epoch_len)
 
         # Monitoring
         self.save_period = int(self.cfg_trainer.save_period)
@@ -146,20 +156,21 @@ class BaseTrainer(ABC):
             *[m.name for m in self.metrics["inference"]],
             writer=self.writer,
         )
+        self._need_spec_log: bool = False
 
         # Checkpoint dir
-        self.checkpoint_dir = (
-            ROOT_PATH / self.cfg_trainer.save_dir / config.writer.run_name
-        )
+        save_dir_abs = hydra.utils.to_absolute_path(self.cfg_trainer.save_dir)
+        self.checkpoint_dir = Path(save_dir_abs) / config.writer.run_name
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
         # Resume / from_pretrained
         if self.cfg_trainer.get("resume_from") is not None:
-            resume_path = self.checkpoint_dir / self.cfg_trainer.resume_from
+            resume_path = hydra.utils.to_absolute_path(self.cfg_trainer.resume_from)
             self._resume_checkpoint(resume_path)
 
         if self.cfg_trainer.get("from_pretrained") is not None:
-            self._from_pretrained(self.cfg_trainer.get("from_pretrained"))
+            pretrained_path = hydra.utils.to_absolute_path(self.cfg_trainer.get("from_pretrained"))
+            self._from_pretrained(pretrained_path)
 
     def train(self):
         """
@@ -236,6 +247,10 @@ class BaseTrainer(ABC):
         bs = int(getattr(dataloader, "batch_size", None) or 1)
         return int(len(dataloader)) * bs
 
+    def _should_log_specs(self, batch_idx: int, mode: str) -> bool:
+        """Переопределяется в Trainer"""
+        return False
+
     @log_examples_per_sec(
         get_n_examples=lambda self, epoch: self._n_train_examples(),
         get_mode=lambda self, epoch: "train",
@@ -247,18 +262,13 @@ class BaseTrainer(ABC):
         # reset epoch+window
         self.train_metrics.reset()
 
-        if self.writer is not None:
-            self.writer.set_step((epoch - 1) * self.epoch_len)
-            self.writer.add_scalar("epoch", epoch)
-
         progress_bar = tqdm(
-            enumerate(self.train_dataloader), desc="train", total=self.epoch_len
+            enumerate(self.train_iter), desc="train", total=self.epoch_len
         )
 
-        last_batch = None
-        last_batch_idx = 0
-
         for batch_idx, batch in progress_bar:
+            self._need_spec_log = self._should_log_specs(batch_idx, mode="train")
+
             try:
                 batch = self.process_batch(batch, metrics=self.train_metrics)
             except torch.cuda.OutOfMemoryError as e:
@@ -271,32 +281,32 @@ class BaseTrainer(ABC):
             # Logging each log_step
             if self.log_step is not None and batch_idx % self.log_step == 0:
                 if self.writer is not None:
-                    self.writer.set_step((epoch - 1) * self.epoch_len + batch_idx)
-                    train_progress = (epoch - 1) + batch_idx / self.epoch_len
+                    global_step0 = (epoch - 1) * self.epoch_len + batch_idx
+                    global_step1 = global_step0 + 1
+
+                    self.writer.set_step(global_step0, mode="train")
+
+                    train_progress = 100.0 * global_step1 / self.total_steps
                     self.writer.add_scalar("trainer/progress", train_progress)
 
                     current_lr = self._get_current_lr()
                     self.writer.add_scalar("learning_rate", float(current_lr))
 
-                    progress_bar.set_postfix(loss=float(batch["loss"].item()))
-
                     self._log_scalars_window(self.train_metrics)
                     self._log_batch(batch_idx, batch, mode="train")
-
-                    # start a new window after logging
                     self.train_metrics.reset_window()
 
             if batch_idx + 1 >= self.epoch_len:
                 break
 
-            last_batch = batch
-            last_batch_idx = batch_idx
-
         if self.writer is not None:
-            self.writer.set_step(epoch * self.epoch_len, mode="train")
+            end_step = epoch * self.epoch_len
+            self.writer.set_step(end_step, mode="train")
+
+            self.writer.add_scalar("epoch", epoch)
+            self.writer.add_scalar("trainer/progress", 100.0 * float(epoch) / float(self.epochs))
+
             self._log_scalars_epoch(self.train_metrics)
-            if self.log_step is None and last_batch is not None:
-                self._log_batch(last_batch_idx, last_batch, mode="train")
 
         logs: Dict[str, float] = self.train_metrics.result()
 
@@ -329,12 +339,13 @@ class BaseTrainer(ABC):
             for batch_idx, batch in tqdm(
                 enumerate(dataloader), desc=part, total=len(dataloader)
             ):
+                self._need_spec_log = self._should_log_specs(batch_idx, mode=part)
                 last_batch_idx = batch_idx
                 last_batch = self.process_batch(batch, metrics=self.evaluation_metrics)
 
             if self.writer is not None:
-                self.writer.set_step(epoch * self.epoch_len, part)
-                self.writer.add_scalar("trainer/progress", float(epoch))
+                self.writer.set_step(epoch * self.epoch_len, mode=part)
+                self.writer.add_scalar("trainer/progress", 100.0 * float(epoch) / float(self.epochs))
                 self._log_scalars_epoch(self.evaluation_metrics)
 
                 if last_batch is not None:
@@ -377,7 +388,7 @@ class BaseTrainer(ABC):
             return best, stop_process, not_improved_count
 
         # check whether model performance improved or not,
-        # # according to specified metric(mnt_metric)
+        # according to specified metric(mnt_metric)
         improved = (
             current <= self.mnt_best
             if self.mnt_mode == "min"
@@ -401,43 +412,13 @@ class BaseTrainer(ABC):
         return best, stop_process, not_improved_count
 
     def move_batch_to_device(self, batch: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Move all necessary tensors to the device.
-
-        Args:
-            batch (dict): dict-based batch containing the data from
-                the dataloader.
-        Returns:
-            batch (dict): dict-based batch containing the data from
-                the dataloader with some of the tensors on the device.
-        """
-        for tensor_name in self.cfg_trainer.device_tensors:
-            if tensor_name in batch and torch.is_tensor(batch[tensor_name]):
-                batch[tensor_name] = batch[tensor_name].to(self.device)
-        return batch
+        return move_tensors_to_device(batch, self.device, self.cfg_trainer.device_tensors)
 
     def transform_batch(self, batch: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Transforms elements in batch. Like instance transform inside the
-        BaseDataset class, but for the whole batch. Improves pipeline speed,
-        especially if used with a GPU.
-
-        Each tensor in a batch undergoes its own transform defined by the key.
-
-        Args:
-            batch (dict): dict-based batch containing the data from
-                the dataloader.
-        Returns:
-            batch (dict): dict-based batch containing the data from
-                the dataloader (possibly transformed via batch transform).
-        """
         # do batch transforms on device
         transform_type = "train" if self.is_train else "inference"
         transforms = (self.batch_transforms or {}).get(transform_type) or {}
-        for tensor_name, transform in transforms.items():
-            if tensor_name in batch and torch.is_tensor(batch[tensor_name]):
-                batch[tensor_name] = transform(batch[tensor_name])
-        return batch
+        return apply_transforms_to_tensors(batch, transforms)
 
     def _clip_grad_norm(self):
         """
@@ -562,7 +543,7 @@ class BaseTrainer(ABC):
             if self.lr_scheduler is not None
             else None,
             "monitor_best": self.mnt_best,
-            "config": self.config,
+            "config": OmegaConf.to_container(self.config, resolve=True, enum_to_str=True),
         }
 
         filename = str(self.checkpoint_dir / f"checkpoint-epoch{epoch}.pth")
@@ -634,7 +615,13 @@ class BaseTrainer(ABC):
         """
         pretrained_path = str(pretrained_path)
         self.logger.info(f"Loading model weights from: {pretrained_path} ...")
-        checkpoint = torch.load(pretrained_path, map_location=self.device)
+        checkpoint = torch.load(
+            pretrained_path,
+            map_location=self.device,
+            weights_only=False,     # Может давать конфликты со старыми версиями torch
+                                    # Оставлено для совместимости с имеющимися моделями
+                                    # В перспективе удалить
+        )
 
         if checkpoint.get("state_dict") is not None:
             self.model.load_state_dict(checkpoint["state_dict"])

@@ -20,8 +20,9 @@ dataloader:
   batch_size: 16
 
 trainer:
-  n_epochs: 100
+  n_epochs: 80
   log_step: 50   # steps
+  log_specs_every_n_epochs: 10
   save_period: 5
   early_stop: 15
   seed: 1

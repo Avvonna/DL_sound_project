@@ -1,6 +1,7 @@
 import io
 
 import matplotlib.pyplot as plt
+import torch
 from PIL import Image
 from torchvision.transforms import ToTensor
 
@@ -41,6 +42,26 @@ def plot_images(imgs, config):
 
     return image
 
+def _spec_to_2d(spec):
+    """
+    Приводит спектрограмму к 2D виду [F, T].
+    Поддерживает [F, T], [1, F, T], [F, T, 1].
+    """
+    if torch.is_tensor(spec):
+        spec = spec.detach().cpu()
+
+    if spec.dim() == 3:
+        if spec.shape[0] == 1:          # [1, F, T]
+            spec = spec[0]
+        elif spec.shape[-1] == 1:       # [F, T, 1]
+            spec = spec[..., 0]
+        else:
+            raise ValueError(f"Ожидалась спектрограмма [F,T] или [1,F,T], получили {tuple(spec.shape)}")
+
+    if spec.dim() != 2:
+        raise ValueError(f"Ожидалась 2D спектрограмма [F,T], получили {tuple(spec.shape)}")
+
+    return spec
 
 def plot_spectrogram(spectrogram, name=None):
     """
@@ -52,17 +73,54 @@ def plot_spectrogram(spectrogram, name=None):
     Returns:
         image (Image): image of the spectrogram
     """
-    plt.figure(figsize=(20, 5))
+    spectrogram = _spec_to_2d(spectrogram)
+
+    fig = plt.figure(figsize=(20, 5))
     plt.pcolormesh(spectrogram)
     if name:
         plt.title(name)
     buf = io.BytesIO()
-    plt.savefig(buf, format="png")
+    fig.tight_layout()
+    plt.savefig(buf, format="png", bbox_inches="tight")
     buf.seek(0)
 
     # convert buffer to Tensor
     image = ToTensor()(Image.open(buf))
 
-    plt.close()
+    plt.close(fig)
+    return image
 
+def plot_spectrogram_grid(spectrograms, titles=None, figsize=(20, 16)):
+    """
+    Рисует несколько спектрограмм в одной фигуре (в столбик).
+
+    Args:
+        spectrograms (list[Tensor]): список спектрограмм
+        titles (list[str] | None): заголовки для каждой спектрограммы.
+        figsize (tuple): размер фигуры.
+
+    Returns:
+        image (Tensor): объединенное изображение (C x H x W).
+    """
+    n = len(spectrograms)
+    if titles is None:
+        titles = [None] * n
+
+    fig, axes = plt.subplots(n, 1, figsize=figsize)
+    if n == 1:
+        axes = [axes]
+
+    for ax, spec, title in zip(axes, spectrograms, titles):
+        spec = _spec_to_2d(spec)
+        ax.pcolormesh(spec)
+        if title:
+            ax.set_title(title)
+        ax.axis("off")
+
+    buf = io.BytesIO()
+    fig.tight_layout()
+    plt.savefig(buf, format="png", bbox_inches="tight")
+    buf.seek(0)
+    image = ToTensor()(Image.open(buf))
+    plt.close(fig)
     return image

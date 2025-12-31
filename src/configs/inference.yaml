@@ -7,6 +7,7 @@ defaults:
   - _self_
 
 decoding:
+  decode_type: "beam"
   beam_size: 20
   topk_per_timestep: 50
   beam_threshold: 100.0

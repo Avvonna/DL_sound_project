@@ -1,0 +1,40 @@
+# @package _global_
+
+defaults:
+  - override /model: deepspeech
+  - override /datasets: librispeech_commonvoice_mix
+  - override /transforms: train
+  - override /metrics: asr_beam
+  - override /lr_scheduler: one_cycle
+  - override /writer: wandb
+
+decoding:
+  beam_size: 3
+  topk_per_timestep: 15
+
+optimizer:
+  lr: 1e-4
+
+lr_scheduler:
+  max_lr: 1e-4
+  pct_start: 0.10
+  final_div_factor: 1000
+
+dataloader:
+  batch_size: 8
+  num_workers: 0
+
+trainer:
+  from_pretrained: "saved/model_best.pth"
+  n_epochs: 20
+  log_step: 50
+  save_period: 2
+  early_stop: 6
+  seed: 1
+
+  max_grad_norm: 5.0                 # чтобы не взрывались градиенты
+  log_specs_every_n_epochs: 5
+  
+writer:
+  run_name: "DeepSpeech_finetune_LS+CV"
+  project_name: "DL_sound_HW2"

@@ -14,9 +14,10 @@ optimizer:
   lr: 1e-3
 
 trainer:
-  n_epochs: 100
+  n_epochs: 40
   epoch_len: 10
   log_step: 5
+  log_specs_every_n_epochs: 5
   save_period: 20
   early_stop: 200
   seed: 42

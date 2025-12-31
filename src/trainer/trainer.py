@@ -1,12 +1,16 @@
 import logging
 from pathlib import Path
+from typing import cast
 
 import pandas as pd
+import torch
 
-from src.logger.utils import plot_spectrogram
+from src.datasets.base_dataset import BaseDataset
+from src.logger.utils import plot_spectrogram_grid
 from src.metrics.tracker import MetricTracker
 from src.metrics.utils import calc_cer, calc_wer
 from src.trainer.base_trainer import BaseTrainer
+from src.utils.decoding_utils import decode_beam, parse_decoding_cfg
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +40,15 @@ class Trainer(BaseTrainer):
                 model outputs, and losses.
         """
         batch = self.move_batch_to_device(batch)
+
+        # сохраняем спектрограмму до batch spec augs
+        if (
+            getattr(self, "_need_spec_log", False)
+            and "spectrogram" in batch
+            and torch.is_tensor(batch["spectrogram"])
+        ):
+            batch["spectrogram_pre_batch"] = batch["spectrogram"].detach().clone()
+
         batch = self.transform_batch(batch)  # transform batch on device -- faster
 
         metric_funcs = self.metrics["inference"]
@@ -73,17 +86,63 @@ class Trainer(BaseTrainer):
         Log data from batch. Calls self.writer.add_* to log data
         to the experiment tracker.
         """
-        # Логируем спектрограммы в обоих режимах
-        self.log_spectrogram(**batch)
+        # спектры логируем редко
+        if self._should_log_specs(batch_idx, mode):
+            self.log_spectrogram(batch)
 
         # Предсказания логируем только на inference
         if mode != "train":
             self.log_predictions(**batch)
 
-    def log_spectrogram(self, spectrogram, **batch):
-        spectrogram_for_plot = spectrogram[0].detach().cpu()
-        image = plot_spectrogram(spectrogram_for_plot)
-        self.writer.add_image("spectrogram", image)
+    def _unwrap_dataset(self, ds):
+        """
+        Возвращает «базовый» датасет, разворачивая типичные обертки.
+        """
+        while hasattr(ds, "dataset"):
+            ds = ds.dataset
+        return ds
+
+    def _should_log_specs(self, batch_idx, mode):
+        """
+        Определяет, нужно ли логировать спектрограммы на текущем шаге.
+        """
+        if mode != "train":
+            return False
+        if batch_idx != 0:
+            return False
+        every = int(self.config.trainer.get("log_specs_every_n_epochs", 5))
+        if every <= 0:
+            return False
+        return (self._last_epoch % every == 0)
+
+    def log_spectrogram(self, batch):
+        """
+        Логирует набор спектрограмм
+        """
+        ds0 = self._unwrap_dataset(self.train_dataset)
+        if not hasattr(ds0, "get_spectrogram"):
+            return
+        ds = cast(BaseDataset, ds0)
+
+        with torch.no_grad():
+            a_clean = batch["audio_orig"][0].detach().cpu()
+            a_aug   = batch["audio"][0].detach().cpu()
+
+            mel_clean_raw = ds.get_spectrogram(a_clean)
+            mel_aug_raw   = ds.get_spectrogram(a_aug)
+
+            mel_proc = None
+            if "spectrogram_pre_batch" in batch:
+                mel_proc = batch["spectrogram_pre_batch"][0].detach().cpu()
+
+        mel_final = batch["spectrogram"][0].detach().cpu()
+
+        img = plot_spectrogram_grid(
+            [mel_clean_raw, mel_aug_raw, mel_proc if mel_proc is not None else mel_final, mel_final],
+            titles=["clean_mel_raw", "wav_aug_mel_raw", "wav_aug_mel_proc", "final_to_model"],
+        )
+
+        self.writer.add_image("spec/pipeline", img)
 
     def log_predictions(
         self,
@@ -97,10 +156,13 @@ class Trainer(BaseTrainer):
         if log_probs is None or log_probs_length is None:
             return
 
-        decoding_cfg = self.config.get("decoding", {})
-        beam_size = decoding_cfg.get("beam_size", 1)
-        topk = decoding_cfg.get("topk_per_timestep", None)
-        threshold = decoding_cfg.get("beam_threshold", 70.0)
+        # decoding config
+        dcfg = parse_decoding_cfg(self.config)
+        self.decode_type = dcfg.decode_type
+        self.beam_size = dcfg.beam_size
+        self.topk_per_timestep = dcfg.topk_per_timestep
+        self.beam_threshold = dcfg.beam_threshold
+        self.save_both_decodes = dcfg.save_both_decodes
 
         log_probs_length_cpu = log_probs_length.detach().cpu().tolist()
         log_probs_cpu = log_probs.detach().cpu()
@@ -116,20 +178,15 @@ class Trainer(BaseTrainer):
 
         # Beam Search
         beam_texts = None
-        if beam_size is not None and beam_size > 1:
-            beam_texts = []
-            for i in range(limit):
-                L = int(log_probs_length_cpu[i])
-                lp = log_probs_cpu[i, :L]
-                beam_texts.append(
-                    self.text_encoder.ctc_beam_search(
-                        lp,
-                        beam_size=beam_size,
-                        topk_per_timestep=topk,
-                        beam_threshold=threshold,
-                        input_type="log_probs",
-                    )
-                )
+        if self.beam_size is not None and self.beam_size > 1:
+            beam_texts = decode_beam(
+                text_encoder=self.text_encoder,
+                log_probs=log_probs_cpu[:limit],                 # [limit, T, V]
+                lengths=log_probs_length[:limit],                # Tensor [limit]
+                beam_size=int(self.beam_size),
+                topk_per_timestep=self.topk_per_timestep,
+                beam_threshold=float(self.beam_threshold),
+            )
 
         if audio_path is None:
             audio_path = [f"sample_{i}" for i in range(len(argmax_texts))]

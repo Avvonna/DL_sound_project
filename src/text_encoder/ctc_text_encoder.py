@@ -40,6 +40,7 @@ class CTCTextEncoder:
     @staticmethod
     def normalize_text(text: str) -> str:
         text = text.lower()
+        text = re.sub(r"\s+", " ", text)
         text = re.sub(r"[^a-z ]", "", text)
         text = re.sub(r"\s+", " ", text).strip()
         return text
@@ -101,7 +102,7 @@ class CTCTextEncoder:
         x: torch.Tensor,
         beam_size: int = 100,
         topk_per_timestep: int | None = 20,
-        beam_threshold: float = 70.0,
+        beam_threshold: float = 15.0,
         input_type: Literal["log_probs", "probs"] = "log_probs",
     ) -> str:
         if input_type == "probs":

@@ -5,13 +5,14 @@ import secrets
 import shutil
 import string
 import subprocess
+from pathlib import Path
 
+import hydra
 import numpy as np
 import torch
 from omegaconf import OmegaConf
 
 from src.logger.logger import setup_logging
-from src.utils.io_utils import ROOT_PATH
 
 
 def set_worker_seed(worker_id):
@@ -82,10 +83,19 @@ def log_git_commit_and_patch(save_dir):
     print("Logging git commit and patch...")
     commit_path = save_dir / "git_commit.txt"
     patch_path = save_dir / "git_diff.patch"
-    with commit_path.open("w") as f:
-        subprocess.call(["git", "rev-parse", "HEAD"], stdout=f)
-    with patch_path.open("w") as f:
-        subprocess.call(["git", "diff", "HEAD"], stdout=f)
+
+    try:
+        project_root = hydra.utils.get_original_cwd()
+    except Exception:
+        project_root = os.getcwd()
+
+    try:
+        with commit_path.open("w") as f:
+            subprocess.call(["git", "rev-parse", "HEAD"], stdout=f, cwd=project_root)
+        with patch_path.open("w") as f:
+            subprocess.call(["git", "diff", "HEAD"], stdout=f, cwd=project_root)
+    except FileNotFoundError:
+        print("Warning: git is not installed or not a git repository. Skipping git logging.")
 
 
 def resume_config(save_dir):
@@ -151,7 +161,9 @@ def setup_saving_and_logging(config):
     Returns:
         logger (Logger): logger that logs output.
     """
-    save_dir = ROOT_PATH / config.trainer.save_dir / config.writer.run_name
+    save_dir_root = hydra.utils.to_absolute_path(config.trainer.save_dir)
+    save_dir = Path(save_dir_root) / config.writer.run_name
+
     saving_init(save_dir, config)
 
     if config.trainer.get("resume_from") is not None:

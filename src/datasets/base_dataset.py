@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 import soundfile as sf
 import torch
+import torchaudio.functional
 from torch.utils.data import Dataset
 
 from src.text_encoder import CTCTextEncoder
@@ -35,7 +36,7 @@ class BaseDataset(Dataset):
         max_audio_length: Optional[float] = None,
         max_text_length: Optional[int] = None,
         shuffle_index: bool = False,
-        instance_transforms: Optional[Dict[str, Callable]] = None,
+        instance_transforms: Optional[Dict[str, Optional[Callable]]] = None,
         require_text: bool = True,
         compute_audio_len_if_missing: bool = True,
     ):
@@ -79,9 +80,14 @@ class BaseDataset(Dataset):
         if text_encoder is None:
             raise ValueError("text_encoder cannot be None")
         if instance_transforms is None:
-            raise ValueError("instance_transforms cannot be None")
+            instance_transforms = {}
         if "get_spectrogram" not in instance_transforms:
-            raise ValueError("instance_transforms must contain 'get_spectrogram'")
+             raise ValueError("No get_spectrogram transform provided in config")
+        
+        if "audio" not in instance_transforms:
+            instance_transforms["audio"] = None
+        if "spectrogram" not in instance_transforms:
+            instance_transforms["spectrogram"] = None
 
         self.text_encoder = text_encoder
         self.instance_transforms = instance_transforms
@@ -94,7 +100,7 @@ class BaseDataset(Dataset):
 
         audio_path = data_dict["path"]
         audio = self.load_audio(audio_path)
-        audio_orig = audio
+        audio_orig = audio.clone()
 
         # wave augs
         if (
@@ -134,20 +140,17 @@ class BaseDataset(Dataset):
         audio_tensor = torch.from_numpy(audio_np).unsqueeze(0)  # (1, T)
 
         if sr != self.target_sr:
-            # linear resampling
-            audio_tensor = torch.nn.functional.interpolate(
-                audio_tensor.unsqueeze(0),  # (1, 1, T)
-                scale_factor=self.target_sr / sr,
-                mode="linear",
-                align_corners=False,
-            ).squeeze(
-                0
-            )  # (1, T)
+            audio_tensor = torchaudio.functional.resample(audio_tensor, sr, self.target_sr)
 
         return audio_tensor
 
     def get_spectrogram(self, audio: torch.Tensor) -> torch.Tensor:
-        return self.instance_transforms["get_spectrogram"](audio)
+        transform = self.instance_transforms.get("get_spectrogram")
+    
+        if transform is None:
+             raise ValueError("get_spectrogram transform is missing or None")
+    
+        return transform(audio)
 
     def _ensure_audio_len(self, index: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         out = []
@@ -249,12 +252,15 @@ class BaseDataset(Dataset):
                 the dataset. The dict has required metadata information,
                 such as label and object path.
         """
-        for entry in index:
-            assert "path" in entry, "Each dataset item must include field 'path'."
-            if self.require_text:
-                assert (
-                    "text" in entry
-                ), "Each dataset item must include field 'text' (ground truth transcription)."
+        for i, entry in enumerate(index):
+            if "path" not in entry:
+                raise KeyError(f"Index item {i} is missing required field 'path'")
+
+            if self.require_text and "text" not in entry:
+                raise KeyError(
+                    f"Index item {i} is missing required field 'text' "
+                    "(ground truth transcription)."
+                )
 
     @staticmethod
     def _sort_index(index: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
