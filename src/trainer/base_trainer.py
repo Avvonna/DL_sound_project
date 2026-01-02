@@ -344,22 +344,29 @@ class BaseTrainer(ABC):
                     continue
                 raise e
 
-            # Логирование каждые log_step микрошагов, сдвинуто на (batch_idx+1),
-            # чтобы совпадать с optimizer-step при grad accumulation
-            if self.log_step is not None and (batch_idx + 1) % self.log_step == 0:
-                if self.writer is not None:
-                    global_step = (epoch - 1) * self.epoch_len + (batch_idx + 1)
-                    self.writer.set_step(global_step, mode="train")
-                    train_progress = 100.0 * global_step / self.total_steps
+            # Определяем, является ли этот шаг шагом логирования скаляров
+            is_log_step = (self.log_step is not None and (batch_idx + 1) % self.log_step == 0)
 
+            # Если есть writer и (нужны логи или нужно записать спектрограмму)
+            if self.writer is not None and (is_log_step or self._need_spec_log):
+
+                global_step = (epoch - 1) * self.epoch_len + (batch_idx + 1)
+                self.writer.set_step(global_step, mode="train")
+
+                # Логируем скаляры (Loss, LR, Progress)
+                if is_log_step:
+                    train_progress = 100.0 * global_step / self.total_steps
                     self.writer.add_scalar("trainer/progress", train_progress)
 
                     current_lr = self._get_current_lr()
                     self.writer.add_scalar("learning_rate", float(current_lr))
 
                     self._log_scalars_window(self.train_metrics)
-                    self._log_batch(batch_idx, batch, mode="train")
+
                     self.train_metrics.reset_window()
+
+                # Логируем спектрограммы
+                self._log_batch(batch_idx, batch, mode="train")
 
             # Ограничение эпохи при бесконечном итераторе
             if batch_idx + 1 >= self.epoch_len:
@@ -560,7 +567,7 @@ class BaseTrainer(ABC):
             return
         for metric_name in metric_tracker.keys():
             self.writer.add_scalar(
-                f"{metric_name}", float(metric_tracker.avg(metric_name))
+                f"epoch_{metric_name}", float(metric_tracker.avg(metric_name))
             )
 
     @abstractmethod
