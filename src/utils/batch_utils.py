@@ -21,7 +21,7 @@ def move_tensors_to_device(batch: Dict[str, Any], device: str, tensor_names: Ite
 
     for name in tensor_names:
         if name in batch and torch.is_tensor(batch[name]):
-            batch[name] = batch[name].to(device)
+            batch[name] = batch[name].to(device, non_blocking=True)
     return batch
 
 

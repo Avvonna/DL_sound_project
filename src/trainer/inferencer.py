@@ -10,6 +10,7 @@ from tqdm.auto import tqdm
 from src.metrics.tracker import MetricTracker
 from src.utils.batch_utils import apply_transforms_to_tensors, move_tensors_to_device
 from src.utils.decoding_utils import decode_beam, decode_greedy, parse_decoding_cfg
+from src.utils.optimizations import maybe_flatten_parameters
 
 
 class Inferencer:
@@ -159,6 +160,10 @@ class Inferencer:
 
                     if out_jsonl is not None:
                         rec = {"id": utt_ids[i], "pred_text": pred_texts[i]}
+                        rec["pred_text_greedy"] = pred_greedy[i]
+                        if pred_beam is not None:
+                            rec["pred_text_beam"] = pred_beam[i]
+
                         if "audio_path" in batch:
                             rec["audio_path"] = str(batch["audio_path"][i])
                         if "text" in batch:
@@ -246,3 +251,4 @@ class Inferencer:
             else checkpoint
         )
         self.model.load_state_dict(state)
+        maybe_flatten_parameters(self.model, self.device)

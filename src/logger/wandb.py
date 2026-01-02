@@ -38,14 +38,16 @@ class WandBWriter:
             mode (str): if online, log data to the remote server. If
                 offline, log locally.
         """
+        self.wandb = None
+        self._enabled: bool = False
+        self.run_id = run_id
+
         try:
             import wandb
 
             wandb.login()
 
-            self.run_id = run_id
-
-            wandb.init(
+            run = wandb.init(
                 project=project_name,
                 entity=entity,
                 config=project_config,
@@ -55,16 +57,27 @@ class WandBWriter:
                 mode=mode,
                 save_code=kwargs.get("save_code", False),
             )
-            self.wandb = wandb
 
-        except ImportError:
-            logger.warning("For use wandb install it via \n\t pip install wandb")
+            self.wandb = wandb
+            self._enabled = True
+
+            # если run_id не был задан
+            if self.run_id is None:
+                self.run_id = run.id
+
+        except Exception as e:
+            logger.warning(f"wandb init failed: {e}")
+            self.wandb = None
+            self._enabled = False
 
         self.step = 0
         # the mode is usually equal to the current partition name
         # used to separate Partition1 and Partition2 metrics
         self.mode = ""
         self.timer = datetime.now()
+
+    def _is_active(self) -> bool:
+        return getattr(self, "_enabled", False) and self.wandb is not None
 
     def set_step(self, step, mode="train"):
         """
@@ -104,6 +117,10 @@ class WandBWriter:
             checkpoint_path (str): path to the checkpoint file.
             save_dir (str): path to the dir, where checkpoint is saved.
         """
+        if not self._is_active():
+            return
+        assert self.wandb is not None
+
         self.wandb.save(checkpoint_path, base_path=save_dir)
 
     def add_scalar(self, scalar_name, scalar):
@@ -114,6 +131,10 @@ class WandBWriter:
             scalar_name (str): name of the scalar to use in the tracker.
             scalar (float): value of the scalar.
         """
+        if not self._is_active():
+            return
+        assert self.wandb is not None
+
         self.wandb.log(
             {
                 self._object_name(scalar_name): scalar,
@@ -128,6 +149,10 @@ class WandBWriter:
         Args:
             scalars (dict): dict, containing scalar name and value.
         """
+        if not self._is_active():
+            return
+        assert self.wandb is not None
+
         self.wandb.log(
             {
                 self._object_name(scalar_name): scalar
@@ -145,6 +170,10 @@ class WandBWriter:
             image (Path | ndarray | Image): image in the WandB-friendly
                 format.
         """
+        if not self._is_active():
+            return
+        assert self.wandb is not None
+
         self.wandb.log(
             {self._object_name(image_name): self.wandb.Image(image)}, step=self.step
         )
@@ -155,9 +184,13 @@ class WandBWriter:
 
         Args:
             audio_name (str): name of the audio to use in the tracker.
-            audio (Path | ndarray): audio in the WandB-friendly format.
+            audio (Tensor): audio in the WandB-friendly format.
             sample_rate (int): audio sample rate.
         """
+        if not self._is_active():
+            return
+        assert self.wandb is not None
+
         audio = audio.detach().cpu().numpy().T
         self.wandb.log(
             {
@@ -176,6 +209,10 @@ class WandBWriter:
             text_name (str): name of the text to use in the tracker.
             text (str): text content.
         """
+        if not self._is_active():
+            return
+        assert self.wandb is not None
+
         self.wandb.log(
             {self._object_name(text_name): self.wandb.Html(text)}, step=self.step
         )
@@ -190,6 +227,10 @@ class WandBWriter:
                 histogram of.
             bins (int | None): the definition of bins for the histogram.
         """
+        if not self._is_active():
+            return
+        assert self.wandb is not None
+
         values_for_hist = values_for_hist.detach().cpu().numpy()
         if bins:
             np_hist = np.histogram(values_for_hist, bins=bins)
@@ -210,6 +251,10 @@ class WandBWriter:
             table_name (str): name of the table to use in the tracker.
             table (DataFrame): table content.
         """
+        if not self._is_active():
+            return
+        assert self.wandb is not None
+
         self.wandb.log(
             {self._object_name(table_name): self.wandb.Table(dataframe=table)},
             step=self.step,
@@ -223,3 +268,10 @@ class WandBWriter:
 
     def add_embedding(self, embedding_name, embedding):
         raise NotImplementedError()
+
+    def close(self):
+        if getattr(self, "_enabled", False) and self.wandb is not None:
+            try:
+                self.wandb.finish()
+            except Exception:
+                pass

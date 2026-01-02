@@ -1,8 +1,0 @@
-defaults:
-  - instance/train@instance_transforms.train
-  - instance/inference@instance_transforms.inference
-
-  - batch/spec_augs@batch_transforms.train.spectrogram
-  - batch/none@batch_transforms.inference.spectrogram
-
-  - _self_

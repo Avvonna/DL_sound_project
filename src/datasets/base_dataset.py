@@ -135,8 +135,13 @@ class BaseDataset(Dataset):
         return instance_data
 
     def load_audio(self, path: str) -> torch.Tensor:
-        audio_np, sr = sf.read(path, dtype="float32", always_2d=True)
-        audio_np = audio_np[:, 0]  # первый канал
+        try:
+            audio_np, sr = sf.read(path, dtype="float32", always_2d=True)
+        except Exception as e:
+            print(f"\n{'='*20}\n[CRITICAL ERROR] Failed to load audio file:\nPath: {path}\n{'='*20}\n")
+            raise e
+
+        audio_np = audio_np[:, 0]
         audio_tensor = torch.from_numpy(audio_np).unsqueeze(0)  # (1, T)
 
         if sr != self.target_sr:

@@ -2,3 +2,4 @@ _target_: torch.optim.lr_scheduler.OneCycleLR
 max_lr: ${optimizer.lr}
 pct_start: 0.1
 anneal_strategy: cos
+final_div_factor: 1000

@@ -15,7 +15,7 @@ class LibriSpeechCommonVoiceMixedDataset(BaseDataset):
     def __init__(
         self,
         text_encoder: CTCTextEncoder,
-        
+
         # Параметры LibriSpeech
         libri_root: str,
         libri_part: str,
@@ -26,7 +26,7 @@ class LibriSpeechCommonVoiceMixedDataset(BaseDataset):
         cv_part: str,
         # Эти параметры определяют, какие файлы попадут в index.json и будут распакованы
         cv_min_duration: float = 0.5,
-        cv_max_duration: float = 20.0, 
+        cv_max_duration: float = 20.0,
         cv_index_limit: Optional[int] = None, # Лимит на парсинг
 
         # Параметры смешивания
@@ -38,7 +38,7 @@ class LibriSpeechCommonVoiceMixedDataset(BaseDataset):
         max_audio_length: float = 20.0,      # Фильтр для батчей
         max_text_length: int = 200,
         shuffle_index: bool = True,
-        
+
         **kwargs
     ):
         instance_transforms = kwargs.get("instance_transforms")
@@ -46,6 +46,9 @@ class LibriSpeechCommonVoiceMixedDataset(BaseDataset):
 
         if instance_transforms is None or "get_spectrogram" not in instance_transforms:
             raise ValueError("No get_spectrogram transform provided in config")
+
+        if not (0.0 <= cv_fraction <= 1.0):
+            raise ValueError(f"cv_fraction must be in [0, 1], got {cv_fraction}")
 
         # Загрузка LibriSpeech, берем всё что есть в папке
         logger.info(f"Loading LibriSpeech: {libri_part}")
@@ -55,7 +58,7 @@ class LibriSpeechCommonVoiceMixedDataset(BaseDataset):
             text_encoder=text_encoder,
             limit=None,
             shuffle_index=False,
-            max_audio_length=None, 
+            max_audio_length=None,
             max_text_length=None,
             target_sr=target_sr,
             instance_transforms=instance_transforms,
@@ -90,19 +93,22 @@ class LibriSpeechCommonVoiceMixedDataset(BaseDataset):
         # Смешивание
         libri_index = list(libri_ds._index)
         cv_index = list(cv_ds._index)
-        
+
         logger.info(f"Pool size: Libri={len(libri_index)}, CV={len(cv_index)}")
 
         rng = random.Random(seed)
 
-        # Если CV пустой или доля 0 - берем только Libri
-        if cv_fraction <= 0.0 or len(cv_index) == 0:
+        if cv_fraction == 0.0 or len(cv_index) == 0:
             mixed = libri_index
+            cv_sample = []
             logger.info("Mixing: using only LibriSpeech.")
+        elif cv_fraction == 1.0:
+            mixed = cv_index
+            cv_sample = cv_index
+            logger.info("Mixing: using only Common Voice.")
         else:
-            # target_cv = L * frac / (1 - frac)
             target_cv_count = int(len(libri_index) * cv_fraction / (1.0 - cv_fraction))
-            
+
             if len(cv_index) >= target_cv_count:
                 # Если в распакованном CV данных достаточно - берем случайную подвыборку
                 cv_sample = rng.sample(cv_index, target_cv_count)
@@ -114,8 +120,14 @@ class LibriSpeechCommonVoiceMixedDataset(BaseDataset):
                     f"Mixing: requested {target_cv_count} CV items, but found only {len(cv_index)}. "
                     f"Using all available CV."
                 )
-            
+
             mixed = libri_index + cv_sample
+
+            logger.info(
+                f"Mix result: Libri_used={len(libri_index)}, "
+                f"CV_used={len(cv_sample)}, total={len(mixed)}, "
+                f"target_CV={target_cv_count if 0.0 < cv_fraction < 1.0 else 'n/a'}"
+            )
 
         # Инициализация BaseDataset
         super().__init__(

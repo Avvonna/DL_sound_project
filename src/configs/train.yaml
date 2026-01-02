@@ -1,38 +1,42 @@
 defaults:
-  - model: baseline
-  - writer: wandb
-  - metrics: asr_argmax
-  - datasets: onebatchtest
+  - common
+  - model: deepspeech
+  - datasets: librispeech
   - dataloader: default
-  - transforms: no_augs
+  - transforms: default
+  - metrics: asr
+  - optimizer: adamw
   - lr_scheduler: one_cycle
+  - writer: wandb
   - _self_
 
-decoding:
-  beam_size: 1            # только Argmax
-  topk_per_timestep: 10
-  beam_threshold: 70.0
+# Глобальные настройки обучения
+trainer:
+  device: auto
+  mixed_precision_dtype: fp16   # варианты: null | fp16 | bf16
+  n_epochs: 50
+  early_stop: 10
+  save_period: 5
+  target_logs_per_epoch: 50
+  min_log_step: 1
+  max_log_step: 100
+  log_specs_every_n_epochs: 5
+  save_dir: "saved"
+  seed: 42
+  grad_accum_steps: 1
+  device_tensors: ["spectrogram", "text_encoded"]
+  max_grad_norm: 5.0
+  monitor: "min val_WER_(Argmax)"
+  override: true
 
-optimizer:
-  _target_: torch.optim.AdamW
-  lr: 3e-4
+# Настройки декодинга
+decoding:
+  beam_size: 1
+  topk_per_timestep: 50
+  beam_threshold: 50.0
 
 loss_function:
   _target_: src.loss.CTCLossWrapper
 
 text_encoder:
   _target_: src.text_encoder.CTCTextEncoder
-
-trainer:
-  log_step: 10
-  n_epochs: 50
-  epoch_len: null         # null = полный проход по датасету
-  device_tensors: ["spectrogram", "text_encoded"]
-  resume_from: null
-  device: auto
-  override: True
-  monitor: "min val_WER_(Argmax)"
-  save_period: 5
-  early_stop: 50
-  save_dir: "saved"
-  seed: 42

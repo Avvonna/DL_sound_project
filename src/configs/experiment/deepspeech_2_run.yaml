@@ -1,0 +1,86 @@
+# @package _global_
+
+defaults:
+  - override /model: deepspeech_2
+  - override /datasets: commonvoice
+  - override /dataloader: default
+  - override /writer: wandb
+  - override /lr_scheduler: one_cycle
+
+
+# Глобальные параметры аудио
+common:
+  sample_rate: 16000
+  n_mels: 80
+  n_fft: 512
+  win_length: 400
+  hop_length: 160
+  f_min: 0
+  f_max: 8000
+
+# Логирование
+writer:
+  project_name: "DL_sound_HW2_DEBUG"
+  run_name: "DeepSpeechUpd_CV_80mels_Augs"
+
+# Параметры модели
+model:
+  # n_feats из common.n_mels
+  rnn_hidden: 800
+  num_rnn_layers: 5
+
+# Обучение
+optimizer:
+  lr: 5e-4
+
+trainer:
+  n_epochs: 100
+  grad_accum_steps: 4
+  device: "cuda"
+
+dataloader:
+  batch_size: 16    # Реальный батч = 16 * 4 = 64
+  num_workers: 8
+
+# Датасет
+datasets:
+  train:
+    tar_path: "C:/Users/Vlad/Downloads/mcv-scripted-en-v24.0.tar.gz"
+    max_duration: 15.0
+    min_duration: 1.0
+    limit: 100000
+  val:
+    tar_path: "C:/Users/Vlad/Downloads/mcv-scripted-en-v24.0.tar.gz"
+
+# Аугментации
+transforms:
+  instance_transforms:
+    train:
+      audio:
+        transforms:
+          - _target_: src.transforms.wav_augs.gain.Gain
+            p: 0.5
+          - _target_: src.transforms.wav_augs.speed_perturb.SpeedPerturb
+            p: 0.3
+            sample_rate: ${common.sample_rate}
+            speeds: [0.9, 1.0, 1.1]
+          - _target_: src.transforms.wav_augs.colored_noise.ColoredNoise
+            p: 0.2
+            sample_rate: ${common.sample_rate}
+            snr_db: [10, 30]
+
+  batch_transforms:
+    train:
+      spectrogram:
+        _target_: torch.nn.Sequential
+        _args_:
+          - _target_: src.transforms.spec_augs.masking.FrequencyMasking
+            p: 0.5
+            freq_mask_param: 15
+          - _target_: src.transforms.spec_augs.masking.TimeMasking
+            p: 0.5
+            time_mask_param: 30
+
+# Beam Search
+decoding:
+  beam_size: 10

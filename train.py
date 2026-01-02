@@ -8,6 +8,7 @@ from omegaconf import OmegaConf
 from src.datasets.data_utils import get_dataloaders
 from src.trainer import Trainer
 from src.utils.init_utils import set_random_seed, setup_saving_and_logging
+from src.utils.optimizations import maybe_flatten_parameters
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -33,6 +34,12 @@ def main(config):
     else:
         device = config.trainer.device
 
+    if device.startswith("cuda"):
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+
     # setup text_encoder
     text_encoder = instantiate(config.text_encoder)
 
@@ -43,6 +50,8 @@ def main(config):
     # build model architecture, then print to console
     model = instantiate(config.model, n_tokens=len(text_encoder)).to(device)
     logger.info(model)
+
+    maybe_flatten_parameters(model, device)
 
     # get function handles of loss and metrics
     loss_function = instantiate(config.loss_function).to(device)
@@ -62,14 +71,20 @@ def main(config):
     # epoch_len = number of iterations for iteration-based training
     # epoch_len = None or len(dataloader) for epoch-based training
     epoch_len = config.trainer.get("epoch_len")
+    micro_steps_per_epoch = int(epoch_len) if epoch_len is not None else len(dataloaders["train"])
 
-    steps_per_epoch = int(epoch_len) if epoch_len is not None else len(dataloaders["train"])
+    grad_accum_steps = int(config.trainer.get("grad_accum_steps", 1))
+    if grad_accum_steps < 1:
+        grad_accum_steps = 1
+
+    steps_per_epoch = (micro_steps_per_epoch + grad_accum_steps - 1) // grad_accum_steps
+
     epochs = int(config.trainer.n_epochs)
 
     lr_cfg = config.lr_scheduler
     lr_target = str(lr_cfg.get("_target_", ""))
 
-    if lr_target.endswith("OneCycleLR") or lr_target.endswith("CyclicLR"):
+    if lr_target.endswith("OneCycleLR"):
         lr_scheduler = instantiate(
             lr_cfg,
             optimizer=optimizer,
@@ -77,11 +92,7 @@ def main(config):
             steps_per_epoch=steps_per_epoch,
         )
     else:
-        # epoch-based schedulers
-        lr_scheduler = instantiate(
-            lr_cfg,
-            optimizer=optimizer,
-        )
+        lr_scheduler = instantiate(lr_cfg, optimizer=optimizer)
 
     trainer = Trainer(
         model=model,

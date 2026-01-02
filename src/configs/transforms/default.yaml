@@ -1,0 +1,48 @@
+instance_transforms:
+  train:
+    get_spectrogram:
+      _target_: torchaudio.transforms.MelSpectrogram
+      sample_rate: ${common.sample_rate}
+      n_fft: ${common.n_fft}
+      win_length: ${common.win_length}
+      hop_length: ${common.hop_length}
+      f_min: ${common.f_min}
+      f_max: ${common.f_max}
+      n_mels: ${common.n_mels}
+    audio:
+      _target_: torchvision.transforms.Compose
+      transforms: [] # Заполняется в эксперименте
+    spectrogram:
+      _target_: torchvision.transforms.Compose
+      transforms:
+        - _target_: src.transforms.Log
+          eps: 1e-5
+        - _target_: src.transforms.PerUtteranceCMVN
+
+  inference:
+    get_spectrogram:
+      _target_: torchaudio.transforms.MelSpectrogram
+      sample_rate: ${common.sample_rate}
+      n_fft: ${common.n_fft}
+      win_length: ${common.win_length}
+      hop_length: ${common.hop_length}
+      f_min: ${common.f_min}
+      f_max: ${common.f_max}
+      n_mels: ${common.n_mels}
+    audio:
+      _target_: torchvision.transforms.Compose
+      transforms: []
+    spectrogram:
+      _target_: torchvision.transforms.Compose
+      transforms:
+        - _target_: src.transforms.Log
+          eps: 1e-5
+        - _target_: src.transforms.PerUtteranceCMVN
+
+batch_transforms:
+  train:
+    spectrogram:
+       _target_: torch.nn.Identity
+  inference:
+    spectrogram:
+       _target_: torch.nn.Identity

@@ -1,0 +1,15 @@
+train:
+  _target_: src.datasets.common_voice.CommonVoiceDataset
+  tar_path: "data/cv.tar.gz"
+  extract_root: "data/datasets/commonvoice"
+  part: "train"
+  limit: null
+  instance_transforms: ${transforms.instance_transforms.train}
+
+val:
+  _target_: src.datasets.common_voice.CommonVoiceDataset
+  tar_path: "data/cv.tar.gz"
+  extract_root: "data/datasets/commonvoice"
+  part: "dev"
+  limit: 2000
+  instance_transforms: ${transforms.instance_transforms.inference}

@@ -1,11 +1,13 @@
 from abc import ABC, abstractmethod
+from logging import Logger
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional
 
 import hydra
 import torch
 from numpy import inf
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
+from torch.amp.grad_scaler import GradScaler
 from torch.nn import Module
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import Optimizer
@@ -19,8 +21,10 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from src.datasets.data_utils import inf_loop
+from src.logger import WandBWriter
 from src.metrics.tracker import MetricTracker
 from src.utils.batch_utils import apply_transforms_to_tensors, move_tensors_to_device
+from src.utils.optimizations import maybe_flatten_parameters
 from src.utils.timing import log_examples_per_sec
 
 
@@ -37,11 +41,11 @@ class BaseTrainer(ABC):
         optimizer: Optimizer,
         lr_scheduler: Optional[LRScheduler],
         text_encoder,
-        config,
+        config: DictConfig,
         device: str,
         dataloaders: Dict[str, DataLoader],
-        logger,
-        writer,
+        logger: Logger,
+        writer: WandBWriter,
         epoch_len: Optional[int] = None,
         skip_oom: bool = True,
         batch_transforms: Optional[Dict[str, Dict[str, Callable]]] = None,
@@ -71,24 +75,32 @@ class BaseTrainer(ABC):
                 should be applied on the whole batch. Depend on the
                 tensor name.
         """
+        # Флаг режима
         self.is_train = True
 
+        # Hydra config
         self.config = config
         self.cfg_trainer = self.config.trainer
 
+        # Устройство и поведение при OOM
         self.device = device
         self.skip_oom = skip_oom
 
+        # Логгер и трекер
         self.logger = logger
         self.writer = writer
-        self.log_step = self.cfg_trainer.get("log_step", 50)
 
+        # Целевое число логов на эпоху: используется для автоподбора log_step
+        self.target_logs_per_epoch = self.cfg_trainer.get("target_logs_per_epoch", 1)
+
+        # Основные компоненты обучения
         self.model = model
         self.criterion = criterion
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
         self.text_encoder = text_encoder
 
+        # Batch-level transforms
         if batch_transforms is None:
             batch_transforms = {"train": {}, "inference": {}}
         self.batch_transforms = batch_transforms
@@ -97,14 +109,21 @@ class BaseTrainer(ABC):
         self.train_loader = dataloaders["train"]
         self.train_dataset = self.train_loader.dataset
 
+        # Batch size берется из train_loader.batch_size, иначе из config, иначе 1
         bs = (
             getattr(self.train_loader, "batch_size", None)
             or getattr(self.config.dataloader, "batch_size", None)
             or 1
         )
 
+        # Накопление градиентов
+        self.grad_accum_steps = int(self.cfg_trainer.get("grad_accum_steps", 1))
+        if self.grad_accum_steps < 1:
+            self.grad_accum_steps = 1
+
         self.train_batch_size = int(bs)
 
+        # Итератор обучения
         self.train_iter: Iterable = self.train_loader
         if epoch_len is None:
             # обычный итератор
@@ -114,9 +133,32 @@ class BaseTrainer(ABC):
             self.epoch_len = int(epoch_len)
             self.train_iter = inf_loop(self.train_loader)
 
+        # Все кроме train считаются eval
         self.evaluation_dataloaders = {
             k: v for k, v in dataloaders.items() if k != "train"
         }
+
+        # Автоподбор log_step
+        adaptive_step = self.epoch_len // self.target_logs_per_epoch
+
+        # Ограничиваем log_step: [min_log_step, max_log_step]
+        self.min_log_step = int(self.cfg_trainer.get("min_log_step", 1))
+        self.max_log_step = int(self.cfg_trainer.get("max_log_step", 100))
+        self.log_step = max(self.min_log_step, min(adaptive_step, self.max_log_step))
+
+        # Соотносим с grad_accum_steps (log_step должен быть кратен ему)
+        if self.grad_accum_steps > 1:
+            self.log_step = (self.log_step // self.grad_accum_steps) * self.grad_accum_steps
+            if self.log_step == 0:
+                self.log_step = self.grad_accum_steps
+
+        self.logger.info(
+            f"Logging setup: "
+            f"Epoch len: {self.epoch_len} | "
+            f"Log step: {self.log_step} batches "
+            f"(~{self.epoch_len / self.log_step:.1f} logs/epoch) | "
+            f"Accum steps: {self.grad_accum_steps}"
+        )
 
         # Epochs
         self._last_epoch = 0
@@ -156,6 +198,8 @@ class BaseTrainer(ABC):
             *[m.name for m in self.metrics["inference"]],
             writer=self.writer,
         )
+
+        # Логирование спектрограмм
         self._need_spec_log: bool = False
 
         # Checkpoint dir
@@ -172,16 +216,30 @@ class BaseTrainer(ABC):
             pretrained_path = hydra.utils.to_absolute_path(self.cfg_trainer.get("from_pretrained"))
             self._from_pretrained(pretrained_path)
 
+        # amp
+        mp = self.cfg_trainer.get("mixed_precision_dtype", None)
+        mp = None if mp is None else str(mp).lower()
+
+        self.use_amp = (mp in ("fp16", "bf16", "bfloat16")) and str(self.device).startswith("cuda")
+        self.amp_dtype = torch.float16 if mp == "fp16" else (torch.bfloat16 if mp in ("bf16", "bfloat16") else None)
+
+        # scaler нужен только для fp16
+        self.use_scaler = self.use_amp and (self.amp_dtype == torch.float16)
+        self.scaler = GradScaler("cuda", enabled=self.use_scaler)
+
     def train(self):
         """
         Wrapper around training process to save model on keyboard interrupt.
         """
         try:
             self._train_process()
-        except KeyboardInterrupt as e:
-            self.logger.info("Saving model on keyboard interrupt")
+        except KeyboardInterrupt:
+            self.logger.info("Interrupted by user. Saving checkpoint...")
             self._save_checkpoint(self._last_epoch, save_best=False)
-            raise e
+            if self.writer is not None:
+                self.writer.close()
+            self.logger.info("Checkpoint saved. Exiting.")
+            return
 
     def _train_process(self):
         """
@@ -217,11 +275,11 @@ class BaseTrainer(ABC):
         if self.lr_scheduler is None:
             return
 
-        # These step per batch, not per epoch
+        # Должны шагать на каждом шаге оптимизатора
         if isinstance(self.lr_scheduler, (OneCycleLR, CyclicLR)):
             return
 
-        # ReduceLROnPlateau requires a metric
+        # Plateau: шаг по метрике (monitor или loss)
         if isinstance(self.lr_scheduler, ReduceLROnPlateau):
             if self.mnt_mode != "off" and self.mnt_metric in logs:
                 self.lr_scheduler.step(logs[self.mnt_metric])
@@ -229,7 +287,7 @@ class BaseTrainer(ABC):
                 self.lr_scheduler.step(logs["loss"])
             return
 
-        # Default: step without arguments
+        # Все остальные: обычный epoch step
         self.lr_scheduler.step()
 
     def _scheduler_step_batch(self):
@@ -241,9 +299,11 @@ class BaseTrainer(ABC):
             self.lr_scheduler.step()
 
     def _n_train_examples(self) -> int:
+        """Оценивает число примеров в эпохе train"""
         return int(self.epoch_len) * int(self.train_batch_size)
 
     def _n_eval_examples(self, dataloader: DataLoader) -> int:
+        """Оценивает число примеров в эпохе test"""
         bs = int(getattr(dataloader, "batch_size", None) or 1)
         return int(len(dataloader)) * bs
 
@@ -262,6 +322,10 @@ class BaseTrainer(ABC):
         # reset epoch+window
         self.train_metrics.reset()
 
+        # reset grad accumulator
+        self._accum_counter = 0
+        self.optimizer.zero_grad(set_to_none=True)
+
         progress_bar = tqdm(
             enumerate(self.train_iter), desc="train", total=self.epoch_len
         )
@@ -275,18 +339,19 @@ class BaseTrainer(ABC):
                 if self.skip_oom:
                     self.logger.warning("OOM on batch. Skipping batch.")
                     torch.cuda.empty_cache()
+                    self.optimizer.zero_grad(set_to_none=True)
+                    self._accum_counter = 0
                     continue
                 raise e
 
-            # Logging each log_step
-            if self.log_step is not None and batch_idx % self.log_step == 0:
+            # Логирование каждые log_step микрошагов, сдвинуто на (batch_idx+1),
+            # чтобы совпадать с optimizer-step при grad accumulation
+            if self.log_step is not None and (batch_idx + 1) % self.log_step == 0:
                 if self.writer is not None:
-                    global_step0 = (epoch - 1) * self.epoch_len + batch_idx
-                    global_step1 = global_step0 + 1
+                    global_step = (epoch - 1) * self.epoch_len + (batch_idx + 1)
+                    self.writer.set_step(global_step, mode="train")
+                    train_progress = 100.0 * global_step / self.total_steps
 
-                    self.writer.set_step(global_step0, mode="train")
-
-                    train_progress = 100.0 * global_step1 / self.total_steps
                     self.writer.add_scalar("trainer/progress", train_progress)
 
                     current_lr = self._get_current_lr()
@@ -296,9 +361,29 @@ class BaseTrainer(ABC):
                     self._log_batch(batch_idx, batch, mode="train")
                     self.train_metrics.reset_window()
 
+            # Ограничение эпохи при бесконечном итераторе
             if batch_idx + 1 >= self.epoch_len:
                 break
 
+        # если эпоха закончилась не на do_step
+        # делаем финальный шаг и считаем grad_norm после unscale
+        if self.grad_accum_steps > 1 and (self._accum_counter % self.grad_accum_steps) != 0:
+            if self.use_scaler:
+                self.scaler.unscale_(self.optimizer)
+
+            grad_norm = self._clip_grad_norm()
+            self.train_metrics.update("grad_norm", float(grad_norm))
+
+            if self.use_scaler:
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                self.optimizer.step()
+
+            self._scheduler_step_batch()
+            self.optimizer.zero_grad(set_to_none=True)
+
+        # Логирование агрегированных epoch-метрик (в конце эпохи)
         if self.writer is not None:
             end_step = epoch * self.epoch_len
             self.writer.set_step(end_step, mode="train")
@@ -461,6 +546,7 @@ class BaseTrainer(ABC):
         return float(self.optimizer.param_groups[0]["lr"])
 
     def _log_scalars_window(self, metric_tracker: MetricTracker):
+        """Логирует метрики по окну"""
         if self.writer is None:
             return
         for metric_name in metric_tracker.keys():
@@ -469,6 +555,7 @@ class BaseTrainer(ABC):
             )
 
     def _log_scalars_epoch(self, metric_tracker: MetricTracker):
+        """Логирует метрики по эпохе"""
         if self.writer is None:
             return
         for metric_name in metric_tracker.keys():
@@ -542,6 +629,7 @@ class BaseTrainer(ABC):
             "lr_scheduler": self.lr_scheduler.state_dict()
             if self.lr_scheduler is not None
             else None,
+            "scaler": self.scaler.state_dict() if getattr(self, "use_scaler", False) else None,
             "monitor_best": self.mnt_best,
             "config": OmegaConf.to_container(self.config, resolve=True, enum_to_str=True),
         }
@@ -598,6 +686,14 @@ class BaseTrainer(ABC):
                     "Warning: failed to load lr_scheduler state_dict. Skipping."
                 )
 
+        if getattr(self, "use_scaler", False) and checkpoint.get("scaler") is not None:
+            try:
+                self.scaler.load_state_dict(checkpoint["scaler"])
+            except Exception:
+                self.logger.warning("Warning: failed to load GradScaler state. Skipping.")
+
+        maybe_flatten_parameters(self.model, self.device)
+
         self.logger.info(
             f"Checkpoint loaded. Resume training from epoch {self.start_epoch}"
         )
@@ -627,3 +723,5 @@ class BaseTrainer(ABC):
             self.model.load_state_dict(checkpoint["state_dict"])
         else:
             self.model.load_state_dict(checkpoint)
+
+        maybe_flatten_parameters(self.model, self.device)

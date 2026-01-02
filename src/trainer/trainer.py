@@ -4,6 +4,7 @@ from typing import cast
 
 import pandas as pd
 import torch
+from torch.amp.autocast_mode import autocast
 
 from src.datasets.base_dataset import BaseDataset
 from src.logger.utils import plot_spectrogram_grid
@@ -54,28 +55,53 @@ class Trainer(BaseTrainer):
         metric_funcs = self.metrics["inference"]
         if self.is_train:
             metric_funcs = self.metrics["train"]
-            self.optimizer.zero_grad()
 
-        outputs = self.model(**batch)
-        batch.update(outputs)
-
-        all_losses = self.criterion(**batch)
-        batch.update(all_losses)
+        if self.use_amp:
+            with autocast("cuda", dtype=self.amp_dtype):
+                outputs = self.model(**batch)
+                batch.update(outputs)
+                all_losses = self.criterion(**batch)
+                batch.update(all_losses)
+        else:
+            outputs = self.model(**batch)
+            batch.update(outputs)
+            all_losses = self.criterion(**batch)
+            batch.update(all_losses)
 
         if self.is_train:
-            batch["loss"].backward()
+            self._accum_counter += 1
+            loss = batch["loss"] / float(self.grad_accum_steps)
 
-            grad_norm = self._clip_grad_norm()
-            batch["grad_norm"] = grad_norm
-            metrics.update("grad_norm", grad_norm)
+            if self.use_scaler:
+                self.scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
-            self.optimizer.step()
-            self._scheduler_step_batch()
+            do_step = (self._accum_counter % self.grad_accum_steps) == 0
 
-        # update metrics for each loss (in case of multiple losses)
+            if do_step:
+                if self.use_scaler:
+                    self.scaler.unscale_(self.optimizer)
+
+                # Логируем grad_norm только на шаге оптимизатора
+                grad_norm = self._clip_grad_norm()
+                batch["grad_norm"] = grad_norm
+                metrics.update("grad_norm", grad_norm)
+                
+                if self.use_scaler:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.optimizer.step()
+
+                self._scheduler_step_batch()
+                self.optimizer.zero_grad(set_to_none=True)
+
+        # метрики по лоссам всегда
         for loss_name in self.config.writer.loss_names:
             metrics.update(loss_name, batch[loss_name].item())
 
+        # остальные метрики по режиму
         for met in metric_funcs:
             metrics.update(met.name, met(**batch))
 
@@ -151,7 +177,7 @@ class Trainer(BaseTrainer):
         log_probs_length=None,
         audio_path=None,
         examples_to_log=10,
-        **batch,
+        **kwargs,
     ):
         if log_probs is None or log_probs_length is None:
             return
@@ -164,16 +190,15 @@ class Trainer(BaseTrainer):
         self.beam_threshold = dcfg.beam_threshold
         self.save_both_decodes = dcfg.save_both_decodes
 
-        log_probs_length_cpu = log_probs_length.detach().cpu().tolist()
+        log_probs_length_cpu = log_probs_length.detach().cpu()
         log_probs_cpu = log_probs.detach().cpu()
 
         limit = min(len(log_probs_cpu), examples_to_log)
+        lengths_list = log_probs_length_cpu[:limit].tolist()
 
         # Argmax (всегда)
-        argmax_inds = log_probs_cpu.argmax(-1).numpy()
-        argmax_inds = [
-            inds[: int(L)] for inds, L in zip(argmax_inds, log_probs_length_cpu)
-        ]
+        argmax_inds = log_probs_cpu[:limit].argmax(-1).numpy()
+        argmax_inds = [inds[: int(L)] for inds, L in zip(argmax_inds, lengths_list)]
         argmax_texts = [self.text_encoder.ctc_decode(inds) for inds in argmax_inds]
 
         # Beam Search
@@ -182,7 +207,7 @@ class Trainer(BaseTrainer):
             beam_texts = decode_beam(
                 text_encoder=self.text_encoder,
                 log_probs=log_probs_cpu[:limit],                 # [limit, T, V]
-                lengths=log_probs_length[:limit],                # Tensor [limit]
+                lengths=log_probs_length_cpu[:limit],            # Tensor [limit]
                 beam_size=int(self.beam_size),
                 topk_per_timestep=self.topk_per_timestep,
                 beam_threshold=float(self.beam_threshold),

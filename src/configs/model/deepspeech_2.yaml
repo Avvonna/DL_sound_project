@@ -1,4 +1,4 @@
-_target_: src.model.deepspeech.DeepSpeech2
+_target_: src.model.deepspeech.UpdDeepSpeech2
 n_feats: ${common.n_mels}
 rnn_hidden: 512
 num_rnn_layers: 5

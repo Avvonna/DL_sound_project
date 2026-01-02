@@ -1,15 +1,9 @@
 train: []
 inference:
-  - _target_: src.metrics.ArgmaxCERMetric
-    name: "CER_(Argmax)"
   - _target_: src.metrics.ArgmaxWERMetric
     name: "WER_(Argmax)"
-
-  - _target_: src.metrics.BeamCERMetric
-    name: "CER_(Beam)"
-    beam_size: ${decoding.beam_size}
-    topk_per_timestep: ${decoding.topk_per_timestep}
-    beam_threshold: ${decoding.beam_threshold}
+  - _target_: src.metrics.ArgmaxCERMetric
+    name: "CER_(Argmax)"
   - _target_: src.metrics.BeamWERMetric
     name: "WER_(Beam)"
     beam_size: ${decoding.beam_size}

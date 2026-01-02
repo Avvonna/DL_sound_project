@@ -38,9 +38,13 @@ def set_random_seed(seed):
     """
     # fix random seeds for reproducibility
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
     torch.backends.cudnn.deterministic = True
+
     # benchmark=True works faster but reproducibility decreases
     torch.backends.cudnn.benchmark = False
     np.random.seed(seed)
