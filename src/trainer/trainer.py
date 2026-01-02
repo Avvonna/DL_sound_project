@@ -70,7 +70,15 @@ class Trainer(BaseTrainer):
 
         if self.is_train:
             self._accum_counter += 1
+
             loss = batch["loss"] / float(self.grad_accum_steps)
+
+            # защита от nan/inf в loss
+            if not bool(torch.isfinite(loss.detach())):
+                self.logger.warning("Non-finite loss. Skipping batch.")
+                self.optimizer.zero_grad(set_to_none=True)
+                self._accum_counter = 0
+                return batch
 
             if self.use_scaler:
                 self.scaler.scale(loss).backward()
@@ -85,16 +93,27 @@ class Trainer(BaseTrainer):
 
                 # Логируем grad_norm только на шаге оптимизатора
                 grad_norm = self._clip_grad_norm()
-                batch["grad_norm"] = grad_norm
-                metrics.update("grad_norm", grad_norm)
-                
+                grad_norm_finite = bool(torch.isfinite(torch.tensor(grad_norm)))
+
+                # проверка градиентов
+                if grad_norm_finite:
+                    batch["grad_norm"] = grad_norm
+                    metrics.update("grad_norm", grad_norm)
+                else:
+                    self.logger.warning(f"Non-finite grad_norm={grad_norm}. Skipping optimizer/scheduler step.")
+                    batch["grad_norm"] = grad_norm
+
                 if self.use_scaler:
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
+                    # шагаем только на здоровых шагах
+                    if grad_norm_finite:
+                        self._scheduler_step_batch()
                 else:
-                    self.optimizer.step()
+                    if grad_norm_finite:
+                        self.optimizer.step()
+                        self._scheduler_step_batch()
 
-                self._scheduler_step_batch()
                 self.optimizer.zero_grad(set_to_none=True)
 
         # метрики по лоссам всегда

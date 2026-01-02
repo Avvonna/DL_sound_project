@@ -37,6 +37,7 @@ trainer:
   n_epochs: 100
   grad_accum_steps: 4
   device: "cuda"
+  # resume_from: "saved/DeepSpeechUpd_CV_80mels_Augs/checkpoint-epoch30.pth"
 
 dataloader:
   batch_size: 16    # Реальный батч = 16 * 4 = 64
