@@ -187,7 +187,7 @@ class Trainer(BaseTrainer):
             titles=["clean_mel_raw", "wav_aug_mel_raw", "wav_aug_mel_proc", "final_to_model"],
         )
 
-        self.writer.add_image("spec/pipeline", img)
+        self.writer.add_image("Spectrograms", img)
 
     def log_predictions(
         self,
@@ -261,6 +261,7 @@ class Trainer(BaseTrainer):
 
             rows[Path(audio_path[i]).name] = row_dict
 
-        self.writer.add_table(
-            "predictions", pd.DataFrame.from_dict(rows, orient="index")
-        )
+        df = pd.DataFrame.from_dict(rows, orient="index")
+        df.index.name = "filename"
+        df.reset_index(inplace=True)
+        self.writer.add_table("predictions", df)

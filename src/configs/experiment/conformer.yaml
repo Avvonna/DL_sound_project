@@ -1,14 +1,12 @@
 # @package _global_
 
 defaults:
-  - override /model: deepspeech_2
+  - override /model: conformer
   - override /datasets: commonvoice
   - override /dataloader: default
   - override /writer: wandb
   - override /lr_scheduler: one_cycle
 
-
-# Глобальные параметры аудио
 common:
   sample_rate: 16000
   n_mels: 80
@@ -21,35 +19,37 @@ common:
 # Логирование
 writer:
   project_name: "DL_sound_HW2_DEBUG"
-  run_name: "DeepSpeechUpd_CV_80mels_Augs"
+  run_name: "Conformer_80mels_Augs"
 
-# Параметры модели
-model:
-  # n_feats из common.n_mels
-  rnn_hidden: 800
-  num_rnn_layers: 5
-
-# Обучение
 optimizer:
+  _target_: torch.optim.AdamW
   lr: 3e-4
+  weight_decay: 1e-4
+
+lr_scheduler:
+  _target_: torch.optim.lr_scheduler.OneCycleLR
+  max_lr: 3e-4
+  pct_start: 0.1            # 10% времени на разогрев
+  epochs: ${trainer.n_epochs}
+  anneal_strategy: cos
 
 trainer:
   n_epochs: 100
+  target_logs_per_epoch: 50
   grad_accum_steps: 4
   device: "cuda"
   mixed_precision_dtype: bf16
-  # resume_from: "saved/DeepSpeechUpd_CV_80mels_Augs/checkpoint-epoch30.pth"
 
 dataloader:
   batch_size: 16    # Реальный батч = 16 * 4 = 64
-  num_workers: 8
+  num_workers: 0
 
 # Датасет
 datasets:
   train:
     tar_path: "C:/Users/Vlad/Downloads/mcv-scripted-en-v24.0.tar.gz"
     max_duration: 15.0
-    min_duration: 1.0
+    min_duration: 2.0
     limit: 100000
   val:
     tar_path: "C:/Users/Vlad/Downloads/mcv-scripted-en-v24.0.tar.gz"
@@ -62,10 +62,10 @@ transforms:
         transforms:
           - _target_: src.transforms.wav_augs.gain.Gain
             p: 0.5
-          - _target_: src.transforms.wav_augs.speed_perturb.SpeedPerturb
-            p: 0.3
-            sample_rate: ${common.sample_rate}
-            speeds: [0.9, 1.0, 1.1]
+          # - _target_: src.transforms.wav_augs.speed_perturb.SpeedPerturb
+          #   p: 0.3
+          #   sample_rate: ${common.sample_rate}
+          #   speeds: [0.9, 1.0, 1.1]
           - _target_: src.transforms.wav_augs.colored_noise.ColoredNoise
             p: 0.2
             sample_rate: ${common.sample_rate}
